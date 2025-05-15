@@ -137,8 +137,8 @@
                ;; cons it onto the front of our list (in rax)
                (Mov   rdi   rax)             ; rdi = old list (cdr)
                (Mov   rax   r8)              ; rax = item    (car)
-               (Mov   (Offset rbx 0) rax)    ; CAR := item
-               (Mov   (Offset rbx 8) rdi)    ; CDR := old list
+               (Mov   (Offset rbx 0) rdi)    ; CDR 
+               (Mov   (Offset rbx 8) rax)    ; car
                (Mov   rax   rbx)             ; rax = new cons-cell ptr
                (Xor   rax   type-cons)       ; tag it
                (Add   rbx   16)              ; bump heap
@@ -345,23 +345,64 @@
          (Label r))))
 
 ;; Expr [Listof Expr] Expr CEnv -> Asm
+;; Expr [Listof Expr] Expr CEnv Boolean -> Asm
+;; Compile (apply ef es e) where ef is the function, es are regular arguments,
+;; and e is the list of additional arguments
 (define (compile-apply ef es e c t?)
-  (let ((r (gensym 'ret)))
-    (seq (Lea rax r)
-         (Push rax)
-         (compile-es (cons ef es) (cons #f c)) ; compile closure and args
-         (compile-e e (append (make-list (length (cons ef es)) #f) (cons #f c)) t?)
-         (Mov r15 (length es))
-         ;; TODO: apply
-         (Mov r8 r15)
-         (Sal r8 3) ; r8 = byte offset over all items added to stack
-         (Add r8 rsp)
-         (Mov rax (Offset r8 0)) ; retrieve closure added at beginning
-         (assert-proc rax)
-         (Xor rax type-proc)
-         (Mov rax (Offset rax 0))
-         (Jmp rax)
-         (Label r))))
+  (let ((r (gensym 'ret))
+        (loop (gensym 'apply_loop))
+        (done (gensym 'apply_done)))
+    (seq 
+     ;; Push return address
+     (Lea rax r)
+     (Push rax)
+     
+     ;; Compile and push function and regular args
+     (compile-es (cons ef es) (cons #f c))
+     
+     ;; Initialize r15 with number of regular args
+     (Mov r15 (length es))
+     
+     ;; Compile the list argument
+     (compile-e e (append (make-list (length (cons ef es)) #f) (cons #f c)) #f)
+     
+     ;; Save list in r11 for iteration
+     (Mov r11 rax)
+     
+     ;; Loop to traverse the list and push each element
+     (Label loop)
+     (Cmp r11 (value->bits '()))  ; Check if we're at end of list
+     (Je done)
+     
+     ;; Make sure it's a cons cell (proper list)
+     (Mov r9 r11)
+     (And r9 ptr-mask)
+     (Cmp r9 type-cons)
+     (Jne 'err)           ; Error if not a proper list
+     
+     ;; Get car of current cons cell and push it
+     (Xor r11 type-cons)
+     (Mov r9 (Offset r11 8))     ; Get car (using offset 8 for CAR)
+     (Push r9)                   ; Push it onto stack
+     (Add r15 1)                 ; Increment arg count
+     (Mov r11 (Offset r11 0))    ; Get cdr for next iteration (using offset 0 for CDR)
+     (Jmp loop)
+     
+     (Label done)
+     
+     ;; Function is at offset: length-args * 8 from rsp
+     (Mov r8 r15)                ; Total argument count
+     (Sal r8 3)                  ; Convert to byte offset (multiply by 8)
+     (Mov rax (Offset rsp r8))   ; Get the function
+     
+     ;; Check and jump to the function
+     (assert-proc rax)
+     (Xor rax type-proc)
+     (Mov rax (Offset rax 0))    ; Get the code label
+     (Jmp rax)
+     
+     ;; Return label
+     (Label r))))
 
 ;; Defns -> Asm
 ;; Compile the closures for ds and push them on the stack

@@ -207,7 +207,7 @@
 
             (Sar r8 int-shift)
             (Mov (Offset rbx 0) r8)
-            (Add rbx 8)
+            (Add rbx 8)         
 
             (Sar rax char-shift)
 
