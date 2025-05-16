@@ -17,6 +17,7 @@
 (define r15 'r15) ; stack pad (non-volatile)
 (define rdx 'rdx) 
 (define r11 'r11) 
+(define r12 'r12)
 
 ;; Prog -> Asm
 (define (compile p)
@@ -30,10 +31,13 @@
            (Label 'entry)
            (Push rbx)    ; save callee-saved register
            (Push r15)
+           (Push r12)      ; save r12 for exception handler chain
+           (Mov r12 0) ; initialize exception handler to null
            (Mov rbx rdi) ; recv heap pointer
            (compile-defines-values ds)
            (compile-e e (reverse (define-ids ds)) #f)
            (Add rsp (* 8 (length ds))) ;; pop function definitions
+           (Pop r12)
            (Pop r15)     ; restore callee-save register
            (Pop rbx)
            (Ret)
@@ -289,13 +293,118 @@
 
 ;; Expr CEnv Boolean -> Asm
 (define (compile-raise e c t?)
-  ;; TODO: raise
-  (seq (Jmp 'err)))
+  (seq 
+   ;; Evaluate the expression to be raised
+   (compile-e e c #f)
+   
+   ;; Save the raised value in a temporary register
+   (Mov r11 rax)
+   
+   ;; Check if any handlers are installed
+   (Cmp r12 0)
+   (Je 'err)  ; No handlers, jump to global error
+   
+   ;; Restore stack pointer from handler
+   (Mov rsp (Offset r12 0))
+   
+   ;; Get handler label and jump to it
+   (Mov rax (Offset r12 8))
+   (Jmp rax)))
 
 ;; [Listof Expr] [Listof Expr] Expr CEnv Boolean -> Asm
 (define (compile-with-handlers ps hs e c t?)
-  ;; TODO: exception handling
-  (seq (Jmp 'err)))
+  (let ((end-label (gensym 'handler_end))
+        (handler-label (gensym 'handler))
+        (predicate-loop (gensym 'pred_loop))
+        (next-predicate (gensym 'next_pred))
+        (handler-found (gensym 'handler_found))
+        (num-handlers (length ps)))
+    
+    (seq
+     ;; Save the current handler pointer
+     (Push r12)
+     
+     ;; Allocate space for new handler
+     (Sub rbx 24)  ; 3 words: stack pointer, handler label, prev handler
+     
+     ;; Set up handler: stack pointer, handler label, prev handler
+     (Mov (Offset rbx 0) rsp)        ; Save current stack pointer
+     (Lea rax handler-label)         ; Get handler code address
+     (Mov (Offset rbx 8) rax)        ; Store handler code address
+     (Mov (Offset rbx 16) r12)       ; Link to previous handler
+     
+     ;; Install new handler
+     (Mov r12 rbx)
+     
+     ;; Compile predicates and handlers
+     (compile-es ps c)  ; Push predicates onto stack
+     (compile-es hs (append (make-list (length ps)) c))  ; Push handlers
+     
+     ;; Compile body with normal control flow
+     (compile-e e (append (make-list (* 2 (length ps))) c) t?)
+     
+     ;; Successful completion - remove handler and restore previous
+     (Mov r12 (Offset r12 16))  ; Restore previous handler
+     (Jmp end-label)  ; Skip handler code
+     
+     ;; Handler code
+     (Label handler-label)
+     
+     ;; r11 contains the raised value
+     ;; Stack contains predicates and handlers
+     
+     ;; Loop through predicates
+     (Mov r9 0)  ; Initialize predicate index
+     
+     (Label predicate-loop)
+     (Cmp r9 num-handlers)
+     (Je 'err)  ; No matching handler, propagate error
+     
+     ;; Get current predicate
+     (Mov rdx r9)
+     (Sal rdx 3)  ; * 8 for byte offset
+     (Mov r8 (Offset rsp rdx))  ; Get predicate function
+     
+     ;; Call predicate with raised value
+     (Mov rax r11)  ; Put raised value in rax for predicate
+     (assert-proc r8)
+     (Xor r8 type-proc)  ; Untag procedure
+     (Mov r8 (Offset r8 0))  ; Get code label
+     (Mov (Offset rsp 0) r12)  ; Save r12 temporarily
+     (Call r8)  ; Call predicate
+     (Mov r12 (Offset rsp 0))  ; Restore r12
+     
+     ;; Check if predicate returned true
+     (Cmp rax (value->bits #f))
+     (Je next-predicate)  ; False, try next
+     
+     ;; Predicate matched, call handler
+     (Mov rdx r9)
+     (Sal rdx 3)  ; * 8 for byte offset
+     (Add rdx (* 8 num-handlers))  ; Skip past predicates
+     (Mov r8 (Offset rsp rdx))  ; Get handler function
+     
+     ;; Call handler with raised value
+     (Mov rax r11)  ; Put raised value in rax for handler
+     (assert-proc r8)
+     (Xor r8 type-proc)  ; Untag procedure
+     (Mov r8 (Offset r8 0))  ; Get code label
+     (Mov (Offset rsp 0) r12)  ; Save r12 temporarily
+     (Call r8)  ; Call handler
+     
+     ;; Result of handler becomes result of with-handlers
+     (Pop r12)  ; Restore previous handler
+     (Jmp end-label)
+     
+     (Label next-predicate)
+     (Add r9 1)  ; Next predicate
+     (Jmp predicate-loop)
+     
+     (Label end-label)
+     
+     ;; Clean up: remove predicates and handlers from stack
+     (Add rsp (* 8 (* 2 num-handlers)))
+     (Pop r12))))  ; Restore previous handler
 
 ;; Id [Listof Expr] CEnv -> Asm
 ;; The return address is placed above the arguments, so callee pops
@@ -351,54 +460,64 @@
 (define (compile-apply ef es e c t?)
   (let ((r (gensym 'ret))
         (loop (gensym 'apply_loop))
-        (done (gensym 'apply_done)))
+        (done (gensym 'apply_done))
+        (num-regular-args (length es)))
     (seq 
      ;; Push return address
      (Lea rax r)
      (Push rax)
      
-     ;; Compile and push function and regular args
+     ;; Compile and push function and regular args (ef, e0, e1, etc.)
      (compile-es (cons ef es) (cons #f c))
      
-     ;; Initialize r15 with number of regular args
-     (Mov r15 (length es))
+     ;; Check that ef is a procedure
+     (Mov r9 (Offset rsp (* 8 num-regular-args))) ; Get the function
+     (Mov rdx r9)                                 ; Copy to rdx for checking
+     (And rdx ptr-mask)                           ; Mask to check tag
+     (Cmp rdx type-proc)                          ; Must be a procedure
+     (Jne 'err)                                   ; Error if not a procedure
      
-     ;; Compile the list argument
+     ;; Compile the list argument en
      (compile-e e (append (make-list (length (cons ef es)) #f) (cons #f c)) #f)
+     
+     ;; Initialize r9 as our runtime arg counter
+     (Mov r9 num-regular-args)                    ; Start counting with the regular arguments
      
      ;; Save list in r11 for iteration
      (Mov r11 rax)
      
      ;; Loop to traverse the list and push each element
      (Label loop)
-     (Cmp r11 (value->bits '()))  ; Check if we're at end of list
+     (Cmp r11 (value->bits '()))                  ; Check if we're at end of list
      (Je done)
      
      ;; Make sure it's a cons cell (proper list)
-     (Mov r9 r11)
-     (And r9 ptr-mask)
-     (Cmp r9 type-cons)
-     (Jne 'err)           ; Error if not a proper list
+     (Mov rdx r11)                                ; Use rdx for checking
+     (And rdx ptr-mask)                           ; Mask to check tag
+     (Cmp rdx type-cons)                          ; Must be a cons
+     (Jne 'err)                                   ; Error if not a proper list
      
      ;; Get car of current cons cell and push it
      (Xor r11 type-cons)
-     (Mov r9 (Offset r11 8))     ; Get car (using offset 8 for CAR)
-     (Push r9)                   ; Push it onto stack
-     (Add r15 1)                 ; Increment arg count
-     (Mov r11 (Offset r11 0))    ; Get cdr for next iteration (using offset 0 for CDR)
+     (Mov rdx (Offset r11 8))                     ; Get car (using offset 8 for CAR)
+     (Push rdx)                                   ; Push it onto stack
+     (Add r9 1)                                   ; Increment arg count register
+     (Mov r11 (Offset r11 0))                     ; Get cdr for next iteration
      (Jmp loop)
      
      (Label done)
      
-     ;; Function is at offset: length-args * 8 from rsp
-     (Mov r8 r15)                ; Total argument count
-     (Sal r8 3)                  ; Convert to byte offset (multiply by 8)
-     (Mov rax (Offset rsp r8))   ; Get the function
+     ;; Set r15 register to final arg count for arity checking
+     (Mov r15 r9)                                 ; r15 holds total argument count for arity check
      
-     ;; Check and jump to the function
-     (assert-proc rax)
+     ;; Function is at offset: arg-count * 8 from rsp
+     (Mov r8 r9)                                  ; Copy arg count to r8
+     (Sal r8 3)                                   ; Convert to byte offset (* 8)
+     (Mov rax (Offset rsp r8))                    ; Get the function
+     
+     ;; Jump to the function (which will check arity using r15)
      (Xor rax type-proc)
-     (Mov rax (Offset rax 0))    ; Get the code label
+     (Mov rax (Offset rax 0))                     ; Get the code label
      (Jmp rax)
      
      ;; Return label

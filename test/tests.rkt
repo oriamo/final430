@@ -405,7 +405,140 @@
    ;; Student examples
    (test-suite
     "Student"
-    ;; TODO: You may want to add more tests here.
+    ;; Basic apply tests
+      ;; Basic apply tests
+      (check-equal? (run-proc '(define (f x y) (+ x y))
+                              '(apply f (list 3 4)))
+                  7)
+
+      ;; Apply with regular arguments + list
+      (check-equal? (run-proc '(define (sum . xs) (if (empty? xs) 0 (+ (car xs) (apply sum (cdr xs)))))
+                              '(apply sum 1 2 (list 3 4 5)))
+                  15)
+
+      ;; Apply with nested lists and multiple operations
+      (check-equal? (run-proc '(define (append-all . lists)
+                                 (if (empty? lists)
+                                    '()
+                                    (if (empty? (car lists))
+                                       (apply append-all (cdr lists))
+                                       (cons (car (car lists))
+                                             (apply append-all (cons (cdr (car lists)) (cdr lists)))))))
+                              '(apply append-all (list (list 1 2) (list 3 4) (list 5 6))))
+                  '(1 2 3 4 5 6))
+
+      ;; Apply with empty list
+      (check-equal? (run-proc '(define (sum . xs) (if (empty? xs) 0 (+ (car xs) (apply sum (cdr xs)))))
+                              '(apply sum '()))
+                  0)
+
+      ;; Error case: apply to non-function
+      (check-equal? (run-proc '(apply 5 '()))
+                  'err)
+
+      ;; Error case: apply with improper list
+      (check-equal? (run-proc '(define (f . xs) xs)
+                              '(apply f (cons 1 2)))
+                  'err)
+      (check-equal? (run-proc '(define (f x y) (+ x y))
+                        '(apply f (cons 3 (cons 4 '()))))
+              7)
+
+      (check-equal? (run-proc '(define (sum . xs) (if (empty? xs) 0 (+ (car xs) (apply sum (cdr xs)))))
+                              '(apply sum 1 2 (cons 3 (cons 4 (cons 5 '())))))
+                  15)
+
+      ;; Apply with nested lists and multiple operations
+      (check-equal? (run-proc 
+                     '(define (append-all . lists)
+                        (if (empty? lists)
+                           '()
+                           (if (empty? (car lists))
+                              (apply append-all (cdr lists))
+                              (cons (car (car lists))
+                                    (apply append-all (cons (cdr (car lists)) (cdr lists)))))))
+                     '(apply append-all (cons (cons 1 (cons 2 '())) 
+                                       (cons (cons 3 (cons 4 '())) 
+                                       (cons (cons 5 (cons 6 '())) '())))))
+                  '(1 2 3 4 5 6))
+
+      ;; Apply with empty list
+      (check-equal? (run-proc '(define (sum . xs) (if (empty? xs) 0 (+ (car xs) (apply sum (cdr xs)))))
+                              '(apply sum '()))
+                  0)
+
+
+
+      ;; Error case: apply to non-function
+      (check-equal? (run-proc '(apply 5 '()))
+                  'err)
+
+      ;; Error case: apply with improper list
+      (check-equal? (run-proc '(define (f . xs) xs)
+                              '(apply f (cons 1 2)))
+                  'err)
+
+      ;; Complex case with nested apply
+      (check-equal? (run-proc 
+                     '(define (make-adder n) (λ (x) (+ x n)))
+                     '(define (my-apply f arg) (f arg))
+                     '(my-apply (make-adder 3) 7))
+                  10)
+
+      ;; Apply with complex arguments and higher-order functions
+      (check-equal? (run-proc 
+                     '(define (map f xs)
+                        (if (empty? xs)
+                           '()
+                           (cons (f (car xs)) (map f (cdr xs)))))
+                     '(define (add3 x) (+ x 3))
+                     '(apply map (cons add3 (cons (cons 1 (cons 2 (cons 3 (cons 4 '())))) '()))))
+                  '(4 5 6 7))
+
+      ;; Tests for Exceptions and Exception Handling
+      ;; Basic handler that catches a raised string
+      (check-equal? (run-proc 
+                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))])
+                     (raise "a string!")))
+                  '("got" . "a string!"))
+
+      ;; Multiple handlers where the second one catches
+      (check-equal? (run-proc 
+                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+                     (raise 10)))
+                  20)
+
+      ;; Exception raised inside an expression
+      (check-equal? (run-proc 
+                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+                     (+ (raise 10) 30)))
+                  20)
+
+      ;; Exception raised in a function call
+      (check-equal? (run-proc 
+                     '(define (f x) (raise 10))
+                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+                     (+ (f 10) 30)))
+                  20)
+
+      ;; No exception raised
+      (check-equal? (run-proc 
+                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+                     'nothing-bad-happens))
+                  'nothing-bad-happens)
+
+      ;; Nested handlers
+      (check-equal? (run-proc 
+                     '(with-handlers ([(λ (s) (if (cons? s) #f (if (empty? s) #f #t))) 
+                                    (λ (s) (cons 'reraised s))])
+                     (with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+                                       [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+                        (raise 'not-handled-by-inner-handler))))
+                  '(reraised . not-handled-by-inner-handler))
     )))
 
 (define (make-io-test-suite name run/io-proc)
