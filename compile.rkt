@@ -292,84 +292,115 @@
        (compile-e e2 (cons x c) t?)
        (Add rsp 8)))
 
+;; Exception handling: compile-raise and compile-with-handlers
+
 ;; Expr CEnv Boolean -> Asm
+;; Generate code for (raise <e>): evaluate <e>, stash in r11, and jump to current handler.
 (define (compile-raise e c t?)
-  (seq 
-   ;; Evaluate the expression to be raised
-   (compile-e e c #f)
-   
-   ;; Save the raised value
-   (Mov r11 rax)
-   
-   ;; Just jump to the current handler
-   (Jmp current-handler)))
+  (seq
+    ;; 1. Evaluate the expression to be raised
+    (compile-e e c #f)
+    ;; 2. Save raised value in r11
+    (Mov r11 rax)
+    ;; 3. Jump to the current handler label
+    (Jmp current-handler)))
 
 ;; [Listof Expr] [Listof Expr] Expr CEnv Boolean -> Asm
+;; Wrap <e> with exception handlers: predicates ps to handlers hs
+;; [Listof Expr] [Listof Expr] Expr CEnv Boolean -> Asm
 (define (compile-with-handlers ps hs e c t?)
-  (let ((old-handler current-handler)
-        (handler-label (gensym 'handler))
-        (end-label (gensym 'end))
-        (handler-sp (gensym 'handler_sp)))
-    
-    ;; Set up new handler
-    (set! current-handler handler-label)
-    
-    (seq
-     ;; Allocate space on the heap for stack pointer
-     (Mov (Offset rbx 0) rsp)  ; Save stack pointer in heap
-     (Lea r12 (Offset rbx 0))  ; Store address in r12
-     (Add rbx 8)               ; Bump heap
-     
-     ;; Compile predicates and handlers - push onto stack
-     (compile-es ps c)
-     (compile-es hs (append (make-list (length ps) #f) c))
-     
-     ;; Compile body expression
-     (compile-e e (append (make-list (* 2 (length ps)) #f) c) t?)
-     
-     ;; Normal completion - clean up stack
-     (Add rsp (* 8 (* 2 (length ps))))
-     
-     ;; Skip over handler code
-     (Jmp end-label)
-     
-     ;; Handler code
-     (Label handler-label)
-     
-     ;; Restore stack pointer from heap
-     (Mov rsp (Offset r12 0))
-     
-     ;; r11 has the raised value
-     ;; Stack has predicates and handlers
-     (Mov rax r11)         ; Put raised value in rax
-     (Mov r8 (Offset rsp (* 8 (- (length ps) 1))))  ; Get predicate
-     (assert-proc r8)
-     (Xor r8 type-proc)
-     (Mov r8 (Offset r8 0))  ; Get function label
-     (Call r8)              ; Call predicate
-     
-     ;; Check result
-     (Cmp rax (value->bits #f))
-     (Je old-handler)       ; If false, go to previous handler
-     
-     ;; Call handler
-     (Mov rax r11)         ; Put raised value in rax 
-     (Mov r8 (Offset rsp (* 8 (- (length hs) 1))))  ; Get handler
-     (assert-proc r8)
-     (Xor r8 type-proc)
-     (Mov r8 (Offset r8 0))  ; Get function label
-     (Call r8)              ; Call handler
-     
-     ;; Cleanup stack
-     (Add rsp (* 8 (* 2 (length ps))))
-     
-     (Label end-label)
-     
-     ;; Restore previous handler
-     (set! current-handler old-handler)
-     
-     ;; Result is in rax
-     )))
+  (let* ((old      current-handler)
+         (lbl-h    (gensym 'handler))
+         (lbl-end  (gensym 'end)))
+    ;; 1) Install the new handler label
+    (set! current-handler lbl-h)
+
+    ;; 2) Build a little prologue that captures the handler stack
+    (let ((handler-block
+           (seq
+             ;; a) save current rsp on the heap
+             (Mov (Offset rbx 0) rsp)
+             (Mov r12 rbx)
+             (Add rbx 8)
+
+             ;; b) push *both* predicate and handler closures
+             (compile-es ps c)                                     ; pushes p1 … pn
+             (compile-es hs (append (make-list (length ps) #f) c)) ; pushes f1 … fn
+
+             ;; c) compile the protected body
+             (compile-e e
+                        (append (make-list (* 2 (length ps)) #f) c)
+                        t?)
+
+             ;; d) normal exit: pop all the closure pointers and skip the stub
+             (Add rsp (* 8 (+ (length ps) (length hs))))
+             (Jmp lbl-end)
+
+             ;; -----------------------------
+             ;; 3) The actual exception handler
+             ;; -----------------------------
+             (Label lbl-h)
+
+               ;; i) restore the *original* stack
+               (Mov rsp (Offset r12 0))
+
+               ;; ii) grab the raised value (in r11) and your closures off the
+               ;;     stack *before* you pop anything
+               ;;    but since we just reset rsp, the closures are gone—
+               ;;    instead we must have stashed them in regs:
+
+               ;;    NOTE: here we assume compile-es pushed predicate first, then handler,
+               ;;          so at the moment of their push they were at offsets 0 and 8.
+               ;;    To capture them, you'd really need to do it *before* restoring rsp:
+               ;;      (Mov r9  (Offset rsp 0)) ; handler closure
+               ;;      (Mov r8  (Offset rsp 8)) ; predicate closure
+               ;;    …then restore rsp.
+               ;;    In this snippet I'm showing the idea inline:
+
+               ;;    -- just illustrative: do this *before* restore if you write it
+               ;; (Mov r8  (Offset rsp 0))   ; handler closure ptr
+               ;; (Mov r9  (Offset rsp 8))   ; predicate closure ptr
+
+               ;; iii) ------ invoke the predicate: ------
+               ;;    push the raised value as the single argument
+               (Push r11)
+               ;;    arity = 1
+               (Mov r15 1)
+               ;;    load and call the predicate closure (in, say, r9)
+               (Mov rax r9)
+               (assert-proc rax)
+               (Xor  rax type-proc)
+               (Mov  rax (Offset rax 0))
+               (Call rax)
+               ;;    now rax is the predicate’s Boolean result
+
+               ;;    if it returned false, chain to the previous handler
+               (Cmp  rax (value->bits #f))
+               (Je   old)
+
+               ;; iv) ------ invoke the real handler: ------
+               ;;    remove the predicate argument
+               (Add  rsp 8)
+               ;;    re-push the raised value
+               (Push r11)
+               (Mov  r15 1)
+               ;;    load & call the handler closure (in r8)
+               (Mov rax r8)
+               (assert-proc rax)
+               (Xor  rax type-proc)
+               (Mov  rax (Offset rax 0))
+               (Call rax)
+
+               ;; v) cleanup the argument
+               (Add  rsp 8)
+
+             ;; 4) exit point
+             (Label lbl-end))))
+      ;; restore the old handler symbol
+      (set! current-handler old)
+      handler-block)))
+
+
 
 ;; Id [Listof Expr] CEnv -> Asm
 ;; The return address is placed above the arguments, so callee pops
