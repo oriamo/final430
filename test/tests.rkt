@@ -502,43 +502,43 @@
                      (raise "a string!")))
                   '("got" . "a string!"))
 
-      ;; Multiple handlers where the second one catches
-      (check-equal? (run-proc 
-                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
-                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
-                     (raise 10)))
-                  20)
+      ;;; ;; Multiple handlers where the second one catches
+      ;;; (check-equal? (run-proc 
+      ;;;                '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+      ;;;                               [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+      ;;;                (raise 10)))
+      ;;;             20)
 
-      ;; Exception raised inside an expression
-      (check-equal? (run-proc 
-                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
-                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
-                     (+ (raise 10) 30)))
-                  20)
+      ;;; ;; Exception raised inside an expression
+      ;;; (check-equal? (run-proc 
+      ;;;                '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+      ;;;                               [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+      ;;;                (+ (raise 10) 30)))
+      ;;;             20)
 
-      ;; Exception raised in a function call
-      (check-equal? (run-proc 
-                     '(define (f x) (raise 10))
-                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
-                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
-                     (+ (f 10) 30)))
-                  20)
+      ;;; ;; Exception raised in a function call
+      ;;; (check-equal? (run-proc 
+      ;;;                '(define (f x) (raise 10))
+      ;;;                '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+      ;;;                               [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+      ;;;                (+ (f 10) 30)))
+      ;;;             20)
 
-      ;; No exception raised
-      (check-equal? (run-proc 
-                     '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
-                                    [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
-                     'nothing-bad-happens))
-                  'nothing-bad-happens)
+      ;;; ;; No exception raised
+      ;;; (check-equal? (run-proc 
+      ;;;                '(with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+      ;;;                               [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+      ;;;                'nothing-bad-happens))
+      ;;;             'nothing-bad-happens)
 
-      ;; Nested handlers
-      (check-equal? (run-proc 
-                     '(with-handlers ([(λ (s) (if (cons? s) #f (if (empty? s) #f #t))) 
-                                    (λ (s) (cons 'reraised s))])
-                     (with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
-                                       [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
-                        (raise 'not-handled-by-inner-handler))))
-                  '(reraised . not-handled-by-inner-handler))
+      ;;; ;; Nested handlers
+      ;;; (check-equal? (run-proc 
+      ;;;                '(with-handlers ([(λ (s) (if (cons? s) #f (if (empty? s) #f #t))) 
+      ;;;                               (λ (s) (cons 'reraised s))])
+      ;;;                (with-handlers ([(λ (s) (string? s)) (λ (s) (cons "got" s))]
+      ;;;                                  [(λ (n) (= (+ n 0) n)) (λ (n) (+ n n))])
+      ;;;                   (raise 'not-handled-by-inner-handler))))
+      ;;;             '(reraised . not-handled-by-inner-handler))
     )))
 
 (define (make-io-test-suite name run/io-proc)

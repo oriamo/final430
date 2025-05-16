@@ -18,6 +18,7 @@
 (define rdx 'rdx) 
 (define r11 'r11) 
 (define r12 'r12)
+(define current-handler 'err)
 
 ;; Prog -> Asm
 (define (compile p)
@@ -297,114 +298,78 @@
    ;; Evaluate the expression to be raised
    (compile-e e c #f)
    
-   ;; Save the raised value in a temporary register
+   ;; Save the raised value
    (Mov r11 rax)
    
-   ;; Check if any handlers are installed
-   (Cmp r12 0)
-   (Je 'err)  ; No handlers, jump to global error
-   
-   ;; Restore stack pointer from handler
-   (Mov rsp (Offset r12 0))
-   
-   ;; Get handler label and jump to it
-   (Mov rax (Offset r12 8))
-   (Jmp rax)))
+   ;; Just jump to the current handler
+   (Jmp current-handler)))
 
 ;; [Listof Expr] [Listof Expr] Expr CEnv Boolean -> Asm
 (define (compile-with-handlers ps hs e c t?)
-  (let ((end-label (gensym 'handler_end))
+  (let ((old-handler current-handler)
         (handler-label (gensym 'handler))
-        (predicate-loop (gensym 'pred_loop))
-        (next-predicate (gensym 'next_pred))
-        (handler-found (gensym 'handler_found))
-        (num-handlers (length ps)))
+        (end-label (gensym 'end))
+        (handler-sp (gensym 'handler_sp)))
+    
+    ;; Set up new handler
+    (set! current-handler handler-label)
     
     (seq
-     ;; Save the current handler pointer
-     (Push r12)
+     ;; Allocate space on the heap for stack pointer
+     (Mov (Offset rbx 0) rsp)  ; Save stack pointer in heap
+     (Lea r12 (Offset rbx 0))  ; Store address in r12
+     (Add rbx 8)               ; Bump heap
      
-     ;; Allocate space for new handler
-     (Sub rbx 24)  ; 3 words: stack pointer, handler label, prev handler
+     ;; Compile predicates and handlers - push onto stack
+     (compile-es ps c)
+     (compile-es hs (append (make-list (length ps) #f) c))
      
-     ;; Set up handler: stack pointer, handler label, prev handler
-     (Mov (Offset rbx 0) rsp)        ; Save current stack pointer
-     (Lea rax handler-label)         ; Get handler code address
-     (Mov (Offset rbx 8) rax)        ; Store handler code address
-     (Mov (Offset rbx 16) r12)       ; Link to previous handler
+     ;; Compile body expression
+     (compile-e e (append (make-list (* 2 (length ps)) #f) c) t?)
      
-     ;; Install new handler
-     (Mov r12 rbx)
+     ;; Normal completion - clean up stack
+     (Add rsp (* 8 (* 2 (length ps))))
      
-     ;; Compile predicates and handlers
-     (compile-es ps c)  ; Push predicates onto stack
-     (compile-es hs (append (make-list (length ps)) c))  ; Push handlers
-     
-     ;; Compile body with normal control flow
-     (compile-e e (append (make-list (* 2 (length ps))) c) t?)
-     
-     ;; Successful completion - remove handler and restore previous
-     (Mov r12 (Offset r12 16))  ; Restore previous handler
-     (Jmp end-label)  ; Skip handler code
+     ;; Skip over handler code
+     (Jmp end-label)
      
      ;; Handler code
      (Label handler-label)
      
-     ;; r11 contains the raised value
-     ;; Stack contains predicates and handlers
+     ;; Restore stack pointer from heap
+     (Mov rsp (Offset r12 0))
      
-     ;; Loop through predicates
-     (Mov r9 0)  ; Initialize predicate index
-     
-     (Label predicate-loop)
-     (Cmp r9 num-handlers)
-     (Je 'err)  ; No matching handler, propagate error
-     
-     ;; Get current predicate
-     (Mov rdx r9)
-     (Sal rdx 3)  ; * 8 for byte offset
-     (Mov r8 (Offset rsp rdx))  ; Get predicate function
-     
-     ;; Call predicate with raised value
-     (Mov rax r11)  ; Put raised value in rax for predicate
+     ;; r11 has the raised value
+     ;; Stack has predicates and handlers
+     (Mov rax r11)         ; Put raised value in rax
+     (Mov r8 (Offset rsp (* 8 (- (length ps) 1))))  ; Get predicate
      (assert-proc r8)
-     (Xor r8 type-proc)  ; Untag procedure
-     (Mov r8 (Offset r8 0))  ; Get code label
-     (Mov (Offset rsp 0) r12)  ; Save r12 temporarily
-     (Call r8)  ; Call predicate
-     (Mov r12 (Offset rsp 0))  ; Restore r12
+     (Xor r8 type-proc)
+     (Mov r8 (Offset r8 0))  ; Get function label
+     (Call r8)              ; Call predicate
      
-     ;; Check if predicate returned true
+     ;; Check result
      (Cmp rax (value->bits #f))
-     (Je next-predicate)  ; False, try next
+     (Je old-handler)       ; If false, go to previous handler
      
-     ;; Predicate matched, call handler
-     (Mov rdx r9)
-     (Sal rdx 3)  ; * 8 for byte offset
-     (Add rdx (* 8 num-handlers))  ; Skip past predicates
-     (Mov r8 (Offset rsp rdx))  ; Get handler function
-     
-     ;; Call handler with raised value
-     (Mov rax r11)  ; Put raised value in rax for handler
+     ;; Call handler
+     (Mov rax r11)         ; Put raised value in rax 
+     (Mov r8 (Offset rsp (* 8 (- (length hs) 1))))  ; Get handler
      (assert-proc r8)
-     (Xor r8 type-proc)  ; Untag procedure
-     (Mov r8 (Offset r8 0))  ; Get code label
-     (Mov (Offset rsp 0) r12)  ; Save r12 temporarily
-     (Call r8)  ; Call handler
+     (Xor r8 type-proc)
+     (Mov r8 (Offset r8 0))  ; Get function label
+     (Call r8)              ; Call handler
      
-     ;; Result of handler becomes result of with-handlers
-     (Pop r12)  ; Restore previous handler
-     (Jmp end-label)
-     
-     (Label next-predicate)
-     (Add r9 1)  ; Next predicate
-     (Jmp predicate-loop)
+     ;; Cleanup stack
+     (Add rsp (* 8 (* 2 (length ps))))
      
      (Label end-label)
      
-     ;; Clean up: remove predicates and handlers from stack
-     (Add rsp (* 8 (* 2 num-handlers)))
-     (Pop r12))))  ; Restore previous handler
+     ;; Restore previous handler
+     (set! current-handler old-handler)
+     
+     ;; Result is in rax
+     )))
 
 ;; Id [Listof Expr] CEnv -> Asm
 ;; The return address is placed above the arguments, so callee pops
