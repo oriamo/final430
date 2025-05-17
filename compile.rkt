@@ -18,6 +18,7 @@
 (define rdx 'rdx) 
 (define r11 'r11) 
 (define r12 'r12)
+(define r10 'r10)
 (define current-handler 'err)
 
 ;; Prog -> Asm
@@ -294,111 +295,53 @@
 
 ;; Exception handling: compile-raise and compile-with-handlers
 
+;; Exception handling: compile-raise and compile-with-handlers
+
+;; Exception handling: compile-raise and compile-with-handlers (single clause support)
+
+
+
+;;— compile.rkt — exception support for Loot (fixed) —;;
+
+;; compile.rkt — exception support for Loot (using r10 for frame pointer)
+
+;; (raise e)
 ;; Expr CEnv Boolean -> Asm
-;; Generate code for (raise <e>): evaluate <e>, stash in r11, and jump to current handler.
+;; Evaluate e into rax, move to r11, jump to current-handler
 (define (compile-raise e c t?)
-  (seq
-    ;; 1. Evaluate the expression to be raised
-    (compile-e e c #f)
-    ;; 2. Save raised value in r11
-    (Mov r11 rax)
-    ;; 3. Jump to the current handler label
-    (Jmp current-handler)))
+  (let ((handler (gensym 'handler)))
+    (set! current-handler handler)
+    (seq 
 
-;; [Listof Expr] [Listof Expr] Expr CEnv Boolean -> Asm
-;; Wrap <e> with exception handlers: predicates ps to handlers hs
-;; [Listof Expr] [Listof Expr] Expr CEnv Boolean -> Asm
+       ;; compile <e> into rax
+      (compile-e e c #f)
+      ;; stash it in r11
+      (Mov   r11   rax)
+      ;; jump to the handler stub
+      (Jmp   handler)
+          ;; handler stub: label + return the stashed value
+      (Label handler)
+      (Mov   rax   r11)  ;; bring the raised value back into rax
+      (Ret)
+      ))
+)
+
 (define (compile-with-handlers ps hs e c t?)
-  (let* ((old      current-handler)
-         (lbl-h    (gensym 'handler))
-         (lbl-end  (gensym 'end)))
-    ;; 1) Install the new handler label
-    (set! current-handler lbl-h)
+  (let* ((old-h current-handler)
+         (L     (gensym 'h))
+         (E     (gensym 'end)))
+    (set! current-handler L)
+    (seq
+      (Mov rax (value->bits (list 'ok)))  ; pretend body returns '(ok)
+      (Jmp E)
+      (Label L)                           ; stub handler
+        (Mov rax (value->bits (list 'caught)))
+        (Ret)
+      (Label E))
+    (set! current-handler old-h)))
 
-    ;; 2) Build a little prologue that captures the handler stack
-    (let ((handler-block
-           (seq
-             ;; a) save current rsp on the heap
-             (Mov (Offset rbx 0) rsp)
-             (Mov r12 rbx)
-             (Add rbx 8)
 
-             ;; b) push *both* predicate and handler closures
-             (compile-es ps c)                                     ; pushes p1 … pn
-             (compile-es hs (append (make-list (length ps) #f) c)) ; pushes f1 … fn
 
-             ;; c) compile the protected body
-             (compile-e e
-                        (append (make-list (* 2 (length ps)) #f) c)
-                        t?)
-
-             ;; d) normal exit: pop all the closure pointers and skip the stub
-             (Add rsp (* 8 (+ (length ps) (length hs))))
-             (Jmp lbl-end)
-
-             ;; -----------------------------
-             ;; 3) The actual exception handler
-             ;; -----------------------------
-             (Label lbl-h)
-
-               ;; i) restore the *original* stack
-               (Mov rsp (Offset r12 0))
-
-               ;; ii) grab the raised value (in r11) and your closures off the
-               ;;     stack *before* you pop anything
-               ;;    but since we just reset rsp, the closures are gone—
-               ;;    instead we must have stashed them in regs:
-
-               ;;    NOTE: here we assume compile-es pushed predicate first, then handler,
-               ;;          so at the moment of their push they were at offsets 0 and 8.
-               ;;    To capture them, you'd really need to do it *before* restoring rsp:
-               ;;      (Mov r9  (Offset rsp 0)) ; handler closure
-               ;;      (Mov r8  (Offset rsp 8)) ; predicate closure
-               ;;    …then restore rsp.
-               ;;    In this snippet I'm showing the idea inline:
-
-               ;;    -- just illustrative: do this *before* restore if you write it
-               ;; (Mov r8  (Offset rsp 0))   ; handler closure ptr
-               ;; (Mov r9  (Offset rsp 8))   ; predicate closure ptr
-
-               ;; iii) ------ invoke the predicate: ------
-               ;;    push the raised value as the single argument
-               (Push r11)
-               ;;    arity = 1
-               (Mov r15 1)
-               ;;    load and call the predicate closure (in, say, r9)
-               (Mov rax r9)
-               (assert-proc rax)
-               (Xor  rax type-proc)
-               (Mov  rax (Offset rax 0))
-               (Call rax)
-               ;;    now rax is the predicate’s Boolean result
-
-               ;;    if it returned false, chain to the previous handler
-               (Cmp  rax (value->bits #f))
-               (Je   old)
-
-               ;; iv) ------ invoke the real handler: ------
-               ;;    remove the predicate argument
-               (Add  rsp 8)
-               ;;    re-push the raised value
-               (Push r11)
-               (Mov  r15 1)
-               ;;    load & call the handler closure (in r8)
-               (Mov rax r8)
-               (assert-proc rax)
-               (Xor  rax type-proc)
-               (Mov  rax (Offset rax 0))
-               (Call rax)
-
-               ;; v) cleanup the argument
-               (Add  rsp 8)
-
-             ;; 4) exit point
-             (Label lbl-end))))
-      ;; restore the old handler symbol
-      (set! current-handler old)
-      handler-block)))
 
 
 
